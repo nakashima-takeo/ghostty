@@ -1,0 +1,95 @@
+# Orbe 向けの GhosttyKit.zip を焼き、自己検証してから Release ghosttykit-<SHA> に出す（包装は orbe/）。
+name: orbe-ghosttykit
+
+on:
+  workflow_dispatch:
+    inputs:
+      ghostty_sha:
+        description: 焼く ghostty のコミット（40 桁 SHA。fork のいずれかのブランチから到達できること）
+        required: true
+      zig_version:
+        description: zig の版（空なら焼くソースの build.zig.zon の minimum_zig_version）
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: orbe-ghosttykit-${{ inputs.ghostty_sha }}
+
+jobs:
+  release:
+    runs-on: macos-26
+    timeout-minutes: 60
+    env:
+      SHA: ${{ inputs.ghostty_sha }}
+      TAG: ghosttykit-${{ inputs.ghostty_sha }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: preflight
+        run: |
+          # 不変の公開物を焼く包装は main に入ったものに限る。
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "::error::main から起動せよ ($GITHUB_REF)"; exit 1; }
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::ghostty_sha は 40 桁の小文字 hex"; exit 1; }
+          # 公開物は差し替えない（Orbe が checksum を固定している）。draft も含めて見る。
+          EXISTING="$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .html_url")"
+          [ -z "$EXISTING" ] || { echo "::error::$TAG は既にある: $EXISTING（出し直すなら ghostty の SHA を変える）"; exit 1; }
+
+      - uses: actions/checkout@v5
+        with:
+          path: pack
+          sparse-checkout: orbe
+
+      - name: source
+        run: |
+          git init -q src
+          cd src
+          git remote add origin "$GITHUB_SERVER_URL/$GH_REPO.git"
+          # タグは取らない（ghostty の build は HEAD に付いたタグをリリースの版とみなす）。
+          git fetch -q --no-tags --filter=blob:none origin '+refs/heads/*:refs/remotes/origin/*'
+          [ -n "$(git branch -r --contains "$SHA" 2>/dev/null)" ] || { echo "::error::$SHA は fork のどのブランチからも到達できない"; exit 1; }
+          git checkout -q --detach "$SHA"
+          [ "$(git rev-parse HEAD)" = "$SHA" ]
+
+      - name: zig version
+        id: zig
+        env:
+          ZIG_INPUT: ${{ inputs.zig_version }}
+        run: |
+          V="${ZIG_INPUT:-$(sed -n 's/^ *\.minimum_zig_version = "\(.*\)",$/\1/p' src/build.zig.zon)}"
+          [[ "$V" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]] || { echo "::error::zig の版を決められない ($V)"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ steps.zig.outputs.version }}
+
+      - name: Metal Toolchain
+        run: sudo xcodebuild -downloadComponent MetalToolchain
+
+      - name: build
+        run: pack/orbe/build.sh src "$RUNNER_TEMP/GhosttyKit.zip"
+
+      - name: verify
+        run: pack/orbe/verify/check.sh "$RUNNER_TEMP/GhosttyKit.zip" "$SHA"
+
+      - name: checksum
+        working-directory: ${{ runner.temp }}
+        run: swift package compute-checksum GhosttyKit.zip > GhosttyKit.zip.sha256
+
+      - name: release
+        working-directory: ${{ runner.temp }}
+        run: |
+          cat > notes.md <<EOF
+          GhosttyKit for Orbe, built from ghostty \`$SHA\`.
+
+          - checksum (SwiftPM): \`$(cat GhosttyKit.zip.sha256)\`
+          - build: ReleaseFast, arm64 (\`-Dxcframework-target=native\`)
+          - zig: $(zig version)
+          - Xcode: $(xcodebuild -version | paste -sd ' ' -)
+          - packaging: $GITHUB_SHA ($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)
+          EOF
+          gh release create "$TAG" --target "$SHA" --title "$TAG" --notes-file notes.md --latest=false \
+            GhosttyKit.zip GhosttyKit.zip.sha256
