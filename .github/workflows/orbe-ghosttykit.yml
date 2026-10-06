@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       ghostty_sha:
-        description: 焼く ghostty のコミット（40 桁 SHA。fork のいずれかのブランチから到達できること）
+        description: 焼く ghostty のコミット（40 桁 SHA。fork のいずれかのブランチから到達でき、tag ghosttykit-<SHA> が打ってあること）
         required: true
       zig_version:
         description: zig の版（空なら焼くソースの build.zig.zon の minimum_zig_version）
@@ -36,6 +36,9 @@ jobs:
           # 公開物は差し替えない（Orbe が checksum を固定している）。draft も含めて見る。
           EXISTING="$(gh api "repos/$GH_REPO/releases" --paginate --jq ".[] | select(.tag_name == \"$TAG\") | .html_url")"
           [ -z "$EXISTING" ] || { echo "::error::$TAG は既にある: $EXISTING（出し直すなら ghostty の SHA を変える）"; exit 1; }
+          # tag は所有者が先に打つ。GITHUB_TOKEN は、workflow ファイルが既定ブランチと違うコミットに tag を作れない。
+          TARGET="$(gh api "repos/$GH_REPO/git/ref/tags/$TAG" --jq '.object.sha' 2>/dev/null)" || { echo "::error::tag $TAG が無い。先に打て: gh api repos/$GH_REPO/git/refs -f ref=refs/tags/$TAG -f sha=$SHA"; exit 1; }
+          [ "$TARGET" = "$SHA" ] || { echo "::error::tag $TAG が $SHA でなく $TARGET を指している"; exit 1; }
 
       - uses: actions/checkout@v5
         with:
@@ -91,5 +94,5 @@ jobs:
           - Xcode: $(xcodebuild -version | paste -sd ' ' -)
           - packaging: $GITHUB_SHA ($GITHUB_SERVER_URL/$GH_REPO/actions/runs/$GITHUB_RUN_ID)
           EOF
-          gh release create "$TAG" --target "$SHA" --title "$TAG" --notes-file notes.md --latest=false \
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file notes.md --latest=false \
             GhosttyKit.zip GhosttyKit.zip.sha256

@@ -12,11 +12,14 @@ zip の根: `GhosttyKit.xcframework/`（ReleaseFast・arm64）、`share/{ghostty
 
 ## 公開
 
+焼くコミットは fork のいずれかのブランチから到達できること。tag を所有者のトークンで打ってから workflow を起動する（GITHUB_TOKEN は、workflow ファイルが既定ブランチと違うコミットに tag を作れない）。
+
 ```bash
+gh api repos/nakashima-takeo/ghostty/git/refs -f ref=refs/tags/ghosttykit-<40 桁 SHA> -f sha=<40 桁 SHA>
 gh workflow run orbe-ghosttykit.yml --repo nakashima-takeo/ghostty --ref main -f ghostty_sha=<40 桁 SHA>
 ```
 
-焼くコミットは fork のいずれかのブランチから到達できること。Release `ghosttykit-<SHA>` はそのコミットに付き、一度出したら差し替えない。
+workflow は zip を自己検証してから、その tag に Release `ghosttykit-<SHA>` を出す。Release は一度出したら差し替えない。workflow が Release を出す前に失敗したら、同じ tag のまま再び起動すればよい。
 
 ## 上流の追従
 
